@@ -3,31 +3,23 @@ const fs = require('fs');
 const path = require('path');
 
 module.exports = function withDualCamera(config) {
-  return withDangerousMod(config, ['ios', addLocalPodToPodfile]);
+  return withDangerousMod(config, ['ios', copyNativeAndPatchPodfile]);
 };
 
-function addLocalPodToPodfile(config) {
-  const podfilePath = path.join(
-    config.modRequest.platformProjectRoot,
-    'Podfile'
-  );
-  const srcDir = path.join(__dirname, '..', 'native', 'LocalPods', 'DualCamera');
-  const destDir = path.join(
-    config.modRequest.platformProjectRoot,
-    'LocalPods',
-    'DualCamera'
-  );
+function copyNativeAndPatchPodfile(config) {
+  const projectRoot = config.modRequest.projectRoot;
+  const podfilePath = path.join(projectRoot, 'ios', 'Podfile');
+  const srcDir = path.join(projectRoot, 'native', 'LocalPods', 'DualCamera');
+  const destDir = path.join(projectRoot, 'ios', 'LocalPods', 'DualCamera');
 
-  // Copy all files from native/ to ios/LocalPods/
+  // Copy native/LocalPods/ to ios/LocalPods/
   if (fs.existsSync(srcDir)) {
     if (!fs.existsSync(destDir)) {
       fs.mkdirSync(destDir, { recursive: true });
     }
     const files = fs.readdirSync(srcDir);
     for (const file of files) {
-      const srcFile = path.join(srcDir, file);
-      const destFile = path.join(destDir, file);
-      fs.copyFileSync(srcFile, destFile);
+      fs.copyFileSync(path.join(srcDir, file), path.join(destDir, file));
     }
   }
 
