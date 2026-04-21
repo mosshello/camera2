@@ -1,0 +1,27 @@
+{
+  "cli": {
+    "version": ">= 18.7.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "cache": {
+        "disabled": true
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "cache": {
+        "disabled": true
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
