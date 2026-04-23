@@ -2,6 +2,7 @@
   "expo": {
     "name": "my-app",
     "slug": "my-app",
+    "owner": "zxn2",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -19,7 +20,8 @@
         "ITSAppUsesNonExemptEncryption": false,
         "NSCameraUsageDescription": "需要访问相机以进行全屏预览与拍照。",
         "NSMicrophoneUsageDescription": "需要访问麦克风以录制视频声音。"
-      }
+      },
+      "buildNumber": "2"
     },
     "android": {
       "adaptiveIcon": {
@@ -54,7 +56,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "7560ddde-2c93-4a85-b278-e1010a985337"
+        "projectId": "e4e41de1-18a3-4f34-96d3-a2867def9130"
       }
     }
   }

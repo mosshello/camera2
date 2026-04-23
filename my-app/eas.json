@@ -9,16 +9,10 @@
       "distribution": "internal"
     },
     "preview": {
-      "distribution": "internal",
-      "cache": {
-        "disabled": true
-      }
+      "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true,
-      "cache": {
-        "disabled": true
-      }
+      "autoIncrement": true
     }
   },
   "submit": {

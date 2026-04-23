@@ -10,5 +10,5 @@ Pod::Spec.new do |s|
   s.source       = { :path => "." }
   s.source_files = "*.{h,m}"
   s.frameworks   = "AVFoundation", "UIKit", "Photos"
-  s.dependency   "React-Core"
+  s.dependency "React-Core"
 end
