@@ -8,5 +8,6 @@
 - (void)sendPhotoError:(NSString *)error;
 - (void)sendRecordingFinished:(NSString *)uri;
 - (void)sendRecordingError:(NSString *)error;
+- (void)sendSessionError:(NSString *)error code:(NSString *)code;
 
 @end

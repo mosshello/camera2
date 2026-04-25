@@ -1,22 +1,27 @@
 #import "DualCameraEventEmitter.h"
 
+static DualCameraEventEmitter *sharedEmitter = nil;
+
 @implementation DualCameraEventEmitter {
   BOOL _hasListeners;
 }
 
 RCT_EXPORT_MODULE()
 
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    sharedEmitter = self;
+  }
+  return self;
+}
+
 + (instancetype)shared {
-  static DualCameraEventEmitter *instance = nil;
-  static dispatch_once_t onceToken;
-  dispatch_once(&onceToken, ^{
-    instance = [[DualCameraEventEmitter alloc] init];
-  });
-  return instance;
+  return sharedEmitter;
 }
 
 - (NSArray<NSString *> *)supportedEvents {
-  return @[@"onPhotoSaved", @"onPhotoError", @"onRecordingFinished", @"onRecordingError"];
+  return @[@"onPhotoSaved", @"onPhotoError", @"onRecordingFinished", @"onRecordingError", @"onSessionError"];
 }
 
 - (void)startObserving { _hasListeners = YES; }
@@ -25,19 +30,33 @@ RCT_EXPORT_MODULE()
 + (BOOL)requiresMainQueueSetup { return YES; }
 
 - (void)sendPhotoSaved:(NSString *)uri {
-  if (_hasListeners) [self sendEventWithName:@"onPhotoSaved" body:@{@"uri": uri}];
+  [self sendEventIfNeeded:@"onPhotoSaved" body:@{@"uri": uri ?: @""}];
 }
 
 - (void)sendPhotoError:(NSString *)error {
-  if (_hasListeners) [self sendEventWithName:@"onPhotoError" body:@{@"error": error}];
+  [self sendEventIfNeeded:@"onPhotoError" body:@{@"error": error ?: @"Photo error"}];
 }
 
 - (void)sendRecordingFinished:(NSString *)uri {
-  if (_hasListeners) [self sendEventWithName:@"onRecordingFinished" body:@{@"uri": uri}];
+  [self sendEventIfNeeded:@"onRecordingFinished" body:@{@"uri": uri ?: @""}];
 }
 
 - (void)sendRecordingError:(NSString *)error {
-  if (_hasListeners) [self sendEventWithName:@"onRecordingError" body:@{@"error": error}];
+  [self sendEventIfNeeded:@"onRecordingError" body:@{@"error": error ?: @"Recording error"}];
+}
+
+- (void)sendSessionError:(NSString *)error code:(NSString *)code {
+  [self sendEventIfNeeded:@"onSessionError" body:@{@"error": error ?: @"Camera session error", @"code": code ?: @"session_error"}];
+}
+
+- (void)sendEventIfNeeded:(NSString *)name body:(NSDictionary *)body {
+  if (!_hasListeners) return;
+
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (self->_hasListeners) {
+      [self sendEventWithName:name body:body];
+    }
+  });
 }
 
 @end

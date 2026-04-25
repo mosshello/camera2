@@ -128,11 +128,18 @@ export default function App() {
       Alert.alert('录制失败', event.error ?? '未知错误');
     });
 
+    const subSessionError = eventEmitter.addListener('onSessionError', (event) => {
+      setSaving(false);
+      setRecording(false);
+      Alert.alert('相机错误', event.error ?? '相机会话启动失败');
+    });
+
     return () => {
       subPhotoSaved.remove();
       subPhotoError.remove();
       subRecordingFinished.remove();
       subRecordingError.remove();
+      subSessionError.remove();
     };
   }, [ensureMediaPermission]);
 
