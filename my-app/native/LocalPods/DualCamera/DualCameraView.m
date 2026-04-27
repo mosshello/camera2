@@ -1644,54 +1644,10 @@
     return;
   }
 
-  // Determine dual mode BEFORE resetting any state
-  BOOL isDual = (self.usingMultiCam && [self isDualLayout:self.currentLayout]);
-
-  // Dual-cam photo compositing
-  if (isDual) {
-    CIImage *ciImage = [CIImage imageWithData:data];
-    if (!ciImage) {
-      [self emitError:@"Failed to create CIImage"];
-      return;
-    }
-
-    NSString *key = (output == self.backPhotoOutput) ? @"back" : @"front";
-    self.pendingDualPhotos[key] = ciImage;
-    if (output == self.backPhotoOutput) self.pendingDualPhotosBack = YES;
-    if (output == self.frontPhotoOutput) self.pendingDualPhotosFront = YES;
-
-    // Front photo captured: trigger back photo capture
-    if (output == self.frontPhotoOutput) {
-      [self captureBackPhotoForDual];
-      return;
-    }
-
-    // Both images received
-    if (self.pendingDualPhotosBack && self.pendingDualPhotosFront) {
-      CIImage *frontImg = self.pendingDualPhotos[@"front"];
-      CIImage *backImg  = self.pendingDualPhotos[@"back"];
-      [self.pendingDualPhotos removeAllObjects];
-
-      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        CIImage *composited = [self compositeDualPhotosForCurrentLayout:frontImg back:backImg];
-        NSString *path = [self saveCIImageAsJPEG:composited];
-        dispatch_async(dispatch_get_main_queue(), ^{
-          if (path) {
-            [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
-          } else {
-            [self emitError:@"Failed to save composited photo"];
-          }
-        });
-      });
-    }
-    return;
-  }
-
-  // Single-cam mode: save directly
-  NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-    [NSString stringWithFormat:@"dual_photo_%ld.jpg", (long)[[NSDate date] timeIntervalSince1970]]];
-  [data writeToFile:path atomically:YES];
-  [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
+  // Dual-cam: delegate is not used for WYSIWYG capture
+  // (WYSIWYG path uses internalTakePhoto → VideoDataOutput → _latestFront/BackFrame)
+  // Only single-cam photo output comes through here
+  return;
 }
 
 #pragma mark - AVCaptureFileOutputRecordingDelegate
