@@ -302,17 +302,17 @@
     return;
   }
 
-  AVCaptureMultiCamSession *session = [[AVCaptureMultiCamSession alloc] init];
+  self.multiCamSession = [[AVCaptureMultiCamSession alloc] init];
   dispatch_sync(dispatch_get_main_queue(), ^{
     [self removePreviewLayers];
 
-    AVCaptureVideoPreviewLayer *bl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
+    AVCaptureVideoPreviewLayer *bl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:self.multiCamSession];
     bl.videoGravity = AVLayerVideoGravityResizeAspectFill;
     bl.frame = self.backPreviewView.bounds;
     [self.backPreviewView.layer addSublayer:bl];
     self.backPreviewLayer = bl;
 
-    AVCaptureVideoPreviewLayer *fl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
+    AVCaptureVideoPreviewLayer *fl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:self.multiCamSession];
     fl.videoGravity = AVLayerVideoGravityResizeAspectFill;
     fl.frame = self.frontPreviewView.bounds;
     [self.frontPreviewView.layer addSublayer:fl];
@@ -343,31 +343,31 @@
   NSString *failure = nil;
   NSString *failureCode = nil;
 
-  [session beginConfiguration];
+  [self.multiCamSession beginConfiguration];
 
   // Audio input (microphone)
   AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
   if (audioDevice) {
     NSError *audioErr = nil;
     self.audioInput = [AVCaptureDeviceInput deviceInputWithDevice:audioDevice error:&audioErr];
-    if (self.audioInput && [session canAddInput:self.audioInput]) {
-      [session addInputWithNoConnections:self.audioInput];
+    if (self.audioInput && [self.multiCamSession canAddInput:self.audioInput]) {
+      [self.multiCamSession addInputWithNoConnections:self.audioInput];
     } else {
       NSLog(@"[DualCamera] Audio input not available: %@", audioErr.localizedDescription);
       self.audioInput = nil;
     }
   }
 
-  if ([session canAddInput:backInput]) {
-    [session addInputWithNoConnections:backInput];
+  if ([self.multiCamSession canAddInput:backInput]) {
+    [self.multiCamSession addInputWithNoConnections:backInput];
   } else {
     ok = NO;
     failure = @"Cannot add back camera input to multi-cam session.";
     failureCode = @"back_input_rejected";
   }
 
-  if (ok && [session canAddInput:frontInput]) {
-    [session addInputWithNoConnections:frontInput];
+  if (ok && [self.multiCamSession canAddInput:frontInput]) {
+    [self.multiCamSession addInputWithNoConnections:frontInput];
   } else if (ok) {
     ok = NO;
     failure = @"Cannot add front camera input to multi-cam session.";
@@ -385,7 +385,7 @@
   if (ok) {
     ok = [self addPreviewLayer:self.backPreviewLayer
                       forPort:backVideoPort
-                    toSession:session
+                    toSession:self.multiCamSession
                   mirrorVideo:NO
                       failure:&failure
                   failureCode:&failureCode];
@@ -394,7 +394,7 @@
   if (ok) {
     ok = [self addPreviewLayer:self.frontPreviewLayer
                       forPort:frontVideoPort
-                    toSession:session
+                    toSession:self.multiCamSession
                   mirrorVideo:YES
                       failure:&failure
                   failureCode:&failureCode];
@@ -403,7 +403,7 @@
   if (ok) {
     ok = [self addOutput:backPhotoOutput
                  forPort:backVideoPort
-               toSession:session
+               toSession:self.multiCamSession
                  failure:&failure
              failureCode:&failureCode];
   }
@@ -411,7 +411,7 @@
   if (ok) {
     ok = [self addOutput:frontPhotoOutput
                  forPort:frontVideoPort
-               toSession:session
+               toSession:self.multiCamSession
                  failure:&failure
              failureCode:&failureCode];
   }
@@ -421,7 +421,7 @@
     NSString *movieFailureCode = nil;
     if (![self addOutput:backMovieOutput
                  forPort:backVideoPort
-               toSession:session
+               toSession:self.multiCamSession
                  failure:&movieFailure
              failureCode:&movieFailureCode]) {
       NSLog(@"[DualCamera] Back movie output disabled: %@ (%@)", movieFailure, movieFailureCode);
@@ -436,7 +436,7 @@
     NSString *frontMovieFailureCode = nil;
     if (![self addOutput:frontMovieOut
                  forPort:frontVideoPort
-               toSession:session
+               toSession:self.multiCamSession
                  failure:&frontMovieFailure
              failureCode:&frontMovieFailureCode]) {
       NSLog(@"[DualCamera] Front movie output disabled: %@ (%@)", frontMovieFailure, frontMovieFailureCode);
@@ -448,11 +448,11 @@
 
   // Audio → movie output connections (must be inside begin/commitConfiguration block)
   if (ok && self.audioInput) {
-    [self addAudioConnectionToMovieOutput:self.audioInput output:backMovieOutput session:session];
-    [self addAudioConnectionToMovieOutput:self.audioInput output:self.frontMovieOutput session:session];
+    [self addAudioConnectionToMovieOutput:self.audioInput output:backMovieOutput session:self.multiCamSession];
+    [self addAudioConnectionToMovieOutput:self.audioInput output:self.frontMovieOutput session:self.multiCamSession];
   }
 
-  [session commitConfiguration];
+  [self.multiCamSession commitConfiguration];
 
   if (!ok) {
     [self clearPreviewLayersOnMainQueue];
@@ -460,13 +460,12 @@
     return;
   }
 
-  if (session.hardwareCost > 1.0) {
+  if (self.multiCamSession.hardwareCost > 1.0) {
     [self clearPreviewLayersOnMainQueue];
     [self emitSessionError:@"This front/back camera configuration exceeds the device hardware budget." code:@"hardware_cost_exceeded"];
     return;
   }
 
-  self.multiCamSession = session;
   self.singleSession = nil;
   self.frontDeviceInput = frontInput;
   self.backDeviceInput = backInput;
@@ -475,10 +474,10 @@
   self.backMovieOutput = backMovieOutput;
   self.usingMultiCam = YES;
   self.isConfigured = YES;
-  [self registerSessionNotifications:session];
+  [self registerSessionNotifications:self.multiCamSession];
 
-  [session startRunning];
-  self.isRunning = session.isRunning;
+  [self.multiCamSession startRunning];
+  self.isRunning = self.multiCamSession.isRunning;
   if (!self.isRunning) {
     [self emitSessionError:@"Multi-cam session did not start running." code:@"multicam_start_failed"];
   }
