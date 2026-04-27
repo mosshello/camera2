@@ -53,10 +53,18 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [recording, setRecording] = useState(false);
   const [cameraStatus, setCameraStatus] = useState('loading');
+  const [audioLevel, setAudioLevel] = useState(0);
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions({
     writeOnly: true,
     granularPermissions: ['photo'],
   });
+  // Layout adjustment state
+  const [dualLayoutRatio, setDualLayoutRatio] = useState(0.5);
+  const [pipSize, setPipSize] = useState(0.28);
+  const [pipPosition, setPipPosition] = useState({ x: 0.85, y: 0.80 });
+  const [frontZoom, setFrontZoom] = useState(1.0);
+  const [backZoom, setBackZoom] = useState(1.0);
+  const [showAdjustment, setShowAdjustment] = useState(false);
 
   // 检查相机权限
   useEffect(() => {
@@ -134,21 +142,30 @@ export default function App() {
       Alert.alert('相机错误', event.error ?? '相机会话启动失败');
     });
 
+    const subAudioLevel = eventEmitter.addListener('onAudioLevel', (event) => {
+      setAudioLevel(event.average ?? 0);
+    });
+
     return () => {
       subPhotoSaved.remove();
       subPhotoError.remove();
       subRecordingFinished.remove();
       subRecordingError.remove();
       subSessionError.remove();
+      subAudioLevel.remove();
     };
   }, [ensureMediaPermission]);
 
-  // 权限批准后启动原生会话
+  // 权限批准后启动原生会话 + 音频监测
   useEffect(() => {
     if (cameraStatus === 'authorized' && DualCameraModule?.startSession) {
       DualCameraModule.startSession();
+      DualCameraModule.startAudioMetering();
     }
     return () => {
+      if (DualCameraModule?.stopAudioMetering) {
+        DualCameraModule.stopAudioMetering();
+      }
       if (DualCameraModule?.stopSession) {
         DualCameraModule.stopSession();
       }
@@ -196,6 +213,11 @@ export default function App() {
 
   const handleModeSwitch = useCallback((mode) => {
     setCameraMode(mode);
+    // Reset adjustment to defaults when switching modes
+    setDualLayoutRatio(0.5);
+    setPipSize(0.28);
+    setPipPosition({ x: 0.85, y: 0.80 });
+    setShowAdjustment(false);
   }, []);
 
   // 加载中
@@ -239,7 +261,14 @@ export default function App() {
   return (
     <View style={styles.root}>
       {NativeDualCameraView ? (
-        <NativeDualCameraView style={styles.nativeCamera} layoutMode={LAYOUT_MAP[cameraMode]} />
+        <NativeDualCameraView
+          style={styles.nativeCamera}
+          layoutMode={LAYOUT_MAP[cameraMode]}
+          dualLayoutRatio={cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX ? dualLayoutRatio : 0.5}
+          pipSize={cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE ? pipSize : 0.28}
+          pipPositionX={pipPosition.x}
+          pipPositionY={pipPosition.y}
+        />
       ) : (
         <View style={styles.fallbackContainer}>
           <Text style={styles.fallbackTitle}>双摄相机</Text>
@@ -277,6 +306,68 @@ export default function App() {
           <View style={styles.recordingDot} />
           <Text style={styles.recordingText}>录制中</Text>
         </View>
+      ) : null}
+
+      {recording && audioLevel > 0.05 ? (
+        <AudioLevelIndicator level={audioLevel} />
+      ) : null}
+
+      {/* 布局调整面板 */}
+      {showAdjustment && (cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX) ? (
+        <View style={styles.adjustmentPanel} pointerEvents="box-none">
+          <Text style={styles.adjustmentTitle}>左右比例</Text>
+          <View style={styles.sliderRow}>
+            <Text style={styles.sliderLabel}>前</Text>
+            <View style={styles.sliderTrack}>
+              <View style={[styles.sliderFill, { flex: dualLayoutRatio }]} />
+            </View>
+            <Text style={styles.sliderLabel}>后</Text>
+          </View>
+          <Text style={styles.adjustmentValue}>{Math.round(dualLayoutRatio * 100)}% : {Math.round((1 - dualLayoutRatio) * 100)}%</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, gap: 4 }}>
+            <Pressable style={styles.adjustBtn} onPress={() => setDualLayoutRatio(v => Math.max(0.1, +(v - 0.05).toFixed(2)))}>
+              <Text style={styles.adjustBtnText}>前+</Text>
+            </Pressable>
+            <Pressable style={styles.adjustBtn} onPress={() => setDualLayoutRatio(v => Math.min(0.9, +(v + 0.05).toFixed(2)))}>
+              <Text style={styles.adjustBtnText}>后+</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {showAdjustment && (cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE) ? (
+        <View style={styles.adjustmentPanel} pointerEvents="box-none">
+          <Text style={styles.adjustmentTitle}>画中画</Text>
+          <View style={styles.sliderRow}>
+            <Text style={styles.sliderLabel}>小</Text>
+            <View style={styles.sliderTrack}>
+              <View style={[styles.sliderFill, { flex: pipSize / 0.5 }]} />
+            </View>
+            <Text style={styles.sliderLabel}>大</Text>
+          </View>
+          <Text style={styles.adjustmentValue}>大小: {Math.round(pipSize * 100)}%</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, gap: 4 }}>
+            <Pressable style={styles.adjustBtn} onPress={() => setPipSize(v => Math.max(0.05, +(v - 0.05).toFixed(2)))}>
+              <Text style={styles.adjustBtnText}>-</Text>
+            </Pressable>
+            <Pressable style={styles.adjustBtn} onPress={() => setPipSize(v => Math.min(0.5, +(v + 0.05).toFixed(2)))}>
+              <Text style={styles.adjustBtnText}>+</Text>
+            </Pressable>
+            <Pressable style={styles.adjustBtn} onPress={() => setPipPosition({ x: 0.85, y: 0.80 })}>
+              <Text style={styles.adjustBtnText}>右下</Text>
+            </Pressable>
+            <Pressable style={styles.adjustBtn} onPress={() => setPipPosition({ x: 0.5, y: 0.5 })}>
+              <Text style={styles.adjustBtnText}>居中</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {/* 调整按钮 */}
+      {(cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX || cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE) && !recording ? (
+        <Pressable style={styles.adjustToggleBtn} onPress={() => setShowAdjustment(v => !v)}>
+          <Text style={styles.adjustToggleText}>{showAdjustment ? '完成' : '调整'}</Text>
+        </Pressable>
       ) : null}
 
       <StatusBar style="light" />
@@ -331,6 +422,28 @@ function ModeButton({ selected, onPress, label }) {
     <Pressable style={[styles.modeButton, selected && styles.modeButtonSelected]} onPress={onPress}>
       <Text style={[styles.modeLabel, selected && styles.modeLabelSelected]}>{label}</Text>
     </Pressable>
+  );
+}
+
+function AudioLevelIndicator({ level }) {
+  const barCount = 12;
+  const activeCount = Math.round(level * barCount);
+
+  return (
+    <View style={styles.audioIndicator} pointerEvents="none">
+      <Text style={styles.audioLabel}>音频</Text>
+      <View style={styles.audioBars}>
+        {Array.from({ length: barCount }).map((_, i) => (
+          <View
+            key={i}
+            style={[
+              styles.audioBar,
+              i < activeCount ? styles.audioBarActive : null,
+            ]}
+          />
+        ))}
+      </View>
+    </View>
   );
 }
 
@@ -404,9 +517,64 @@ const styles = StyleSheet.create({
   },
   recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#ff4444' },
   recordingText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+
+  audioIndicator: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 44,
+    left: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 6,
+  },
+  audioLabel: { color: '#aaa', fontSize: 11, fontWeight: '600' },
+  audioBars: { flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 16 },
+  audioBar: {
+    width: 3,
+    height: 4,
+    borderRadius: 1.5,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  audioBarActive: { backgroundColor: '#4dff4d' },
+
   centered: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 },
   permissionTitle: { color: '#fff', fontSize: 20, fontWeight: '700', marginBottom: 8, textAlign: 'center' },
   permissionBody: { color: 'rgba(255,255,255,0.75)', fontSize: 15, textAlign: 'center', marginBottom: 20, lineHeight: 22 },
   primaryButton: { paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, backgroundColor: '#fff' },
   primaryButtonLabel: { color: '#000', fontSize: 16, fontWeight: '600' },
+
+  adjustmentPanel: {
+    position: 'absolute', left: 12, top: 80,
+    width: 180, backgroundColor: 'rgba(0,0,0,0.7)',
+    borderRadius: 12, padding: 12,
+  },
+  adjustmentTitle: { color: '#fff', fontSize: 13, fontWeight: '700', marginBottom: 8 },
+  sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sliderLabel: { color: '#aaa', fontSize: 11, width: 16, textAlign: 'center' },
+  sliderTrack: {
+    flex: 1, height: 4, backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 2, position: 'relative',
+  },
+  sliderFill: { backgroundColor: '#4da6ff', borderRadius: 2, position: 'absolute', left: 0, top: 0, bottom: 0 },
+  sliderThumb: {
+    position: 'absolute', top: -5,
+    width: 14, height: 14, borderRadius: 7,
+    backgroundColor: '#fff', borderWidth: 2, borderColor: '#4da6ff',
+  },
+  adjustmentValue: { color: '#4da6ff', fontSize: 12, marginTop: 6, fontWeight: '600' },
+  adjustBtn: {
+    marginTop: 8, paddingVertical: 4, paddingHorizontal: 10,
+    backgroundColor: 'rgba(77,166,255,0.3)', borderRadius: 6, alignItems: 'center',
+  },
+  adjustBtnText: { color: '#4da6ff', fontSize: 12, fontWeight: '600' },
+  adjustToggleBtn: {
+    position: 'absolute', left: 12, top: 60,
+    paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+  },
+  adjustToggleText: { color: '#fff', fontSize: 13, fontWeight: '600' },
 });

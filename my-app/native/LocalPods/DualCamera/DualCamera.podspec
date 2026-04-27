@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name         = "DualCamera"
-  s.version      = "1.0.0"
+  s.version      = "1.0.1"
   s.summary      = "Dual camera module for React Native"
   s.description  = "Native dual camera module using two AVCaptureSessions"
   s.homepage     = "https://github.com/example/DualCamera"

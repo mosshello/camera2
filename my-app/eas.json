@@ -15,6 +15,11 @@
       "autoIncrement": true
     }
   },
+  "hooks": {
+    "prebuild": {
+      "ios": "node -e \"var fs=require('fs'),path=require('path');var src=path.join(process.cwd(),'native','LocalPods','DualCamera'),dst=path.join(process.cwd(),'ios','LocalPods','DualCamera');fs.rmSync(dst,{recursive:true,force:true});function copy(s,d){fs.mkdirSync(d,{recursive:true});for(var e of fs.readdirSync(s,{withFileTypes:true})){var sp=path.join(s,e.name),dp=path.join(d,e.name);e.isDirectory()?copy(sp,dp):fs.copyFileSync(sp,dp);}};copy(src,dst);console.log('Native files synced to ios/LocalPods/DualCamera/');\""
+    }
+  },
   "submit": {
     "production": {}
   }

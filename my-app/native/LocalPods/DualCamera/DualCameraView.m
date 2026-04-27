@@ -1,6 +1,9 @@
 #import "DualCameraView.h"
 #import "DualCameraEventEmitter.h"
 #import "DualCameraSessionManager.h"
+#import <CoreImage/CoreImage.h>
+#import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 
 @interface DualCameraView () <AVCapturePhotoCaptureDelegate, AVCaptureFileOutputRecordingDelegate>
 
@@ -9,6 +12,7 @@
 @property (nonatomic, strong) AVCaptureDeviceInput *frontDeviceInput;
 @property (nonatomic, strong) AVCaptureDeviceInput *backDeviceInput;
 @property (nonatomic, strong) AVCaptureDeviceInput *singleDeviceInput;
+@property (nonatomic, strong) AVCaptureDeviceInput *audioInput;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *frontPreviewLayer;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *backPreviewLayer;
 @property (nonatomic, strong) AVCaptureVideoPreviewLayer *singlePreviewLayer;
@@ -16,6 +20,7 @@
 @property (nonatomic, strong) AVCapturePhotoOutput *backPhotoOutput;
 @property (nonatomic, strong) AVCapturePhotoOutput *singlePhotoOutput;
 @property (nonatomic, strong) AVCaptureMovieFileOutput *backMovieOutput;
+@property (nonatomic, strong) AVCaptureMovieFileOutput *frontMovieOutput;
 @property (nonatomic, strong) AVCaptureMovieFileOutput *singleMovieOutput;
 @property (nonatomic, strong) UIView *frontPreviewView;
 @property (nonatomic, strong) UIView *backPreviewView;
@@ -25,6 +30,21 @@
 @property (nonatomic, assign) BOOL isConfigured;
 @property (nonatomic, assign) BOOL isRunning;
 @property (nonatomic, copy) NSString *currentLayout;
+
+// Dual compositing state
+@property (nonatomic, strong) NSMutableDictionary *pendingDualPhotos;
+@property (nonatomic, assign) BOOL pendingDualPhotosFront;
+@property (nonatomic, assign) BOOL pendingDualPhotosBack;
+@property (nonatomic, strong) NSString *backRecordingPath;
+@property (nonatomic, strong) NSString *frontRecordingPath;
+@property (nonatomic, assign) BOOL backRecordingFinished;
+@property (nonatomic, assign) BOOL frontRecordingFinished;
+@property (nonatomic, assign) BOOL isDualRecordingActive; // prevents layout change during dual recording
+@property (nonatomic, strong) AVAssetExportSession *videoExportSession; // keep alive until export completes
+@property (nonatomic, strong) dispatch_queue_t compositingQueue;
+
+// canvasSizeAtRecording — only declared here (not in .h), used internally
+@property (nonatomic, assign) CGSize canvasSizeAtRecording;
 
 @end
 
@@ -58,6 +78,16 @@
   _isConfigured = NO;
   _isRunning = NO;
   _usingMultiCam = NO;
+  _pendingDualPhotos = [NSMutableDictionary dictionary];
+  _compositingQueue = dispatch_queue_create("com.zhengning.dualcamera.compositing", DISPATCH_QUEUE_SERIAL);
+  // Default values for layout/PiP/zoom properties (declared in .h for React Native)
+  _dualLayoutRatio = 0.5;
+  _pipSize = 0.28;
+  _pipPositionX = 0.85;
+  _pipPositionY = 0.80;
+  _frontZoomFactor = 1.0;
+  _backZoomFactor = 1.0;
+  _canvasSizeAtRecording = CGSizeZero;
   [self createPlaceholderViews];
   [[DualCameraSessionManager shared] registerView:self];
 }
@@ -84,7 +114,33 @@
   });
 }
 
-#pragma mark - Placeholder Views
+- (void)setDualLayoutRatio:(CGFloat)ratio {
+  _dualLayoutRatio = MAX(0.1, MIN(0.9, ratio));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateLayout];
+  });
+}
+
+- (void)setPipSize:(CGFloat)size {
+  _pipSize = MAX(0.05, MIN(0.5, size));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateLayout];
+  });
+}
+
+- (void)setPipPositionX:(CGFloat)px {
+  _pipPositionX = MAX(0, MIN(1, px));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateLayout];
+  });
+}
+
+- (void)setPipPositionY:(CGFloat)py {
+  _pipPositionY = MAX(0, MIN(1, py));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self updateLayout];
+  });
+}
 
 - (void)createPlaceholderViews {
   [_frontPreviewView removeFromSuperview];
@@ -119,10 +175,9 @@
 - (void)updateLayout {
   CGFloat w = self.bounds.size.width;
   CGFloat h = self.bounds.size.height;
+  CGFloat ratio = self.dualLayoutRatio > 0 ? self.dualLayoutRatio : 0.5;
 
-  _frontPreviewView.layer.cornerRadius = 0;
   _frontPreviewView.layer.masksToBounds = YES;
-  _backPreviewView.layer.cornerRadius = 0;
   _backPreviewView.layer.masksToBounds = YES;
 
   if ([_currentLayout isEqualToString:@"back"]) {
@@ -136,32 +191,44 @@
     _frontPreviewView.frame = self.bounds;
 
   } else if ([_currentLayout isEqualToString:@"lr"]) {
+    // LR: portrait canvas, split left/right vertically
+    // back on left (ratio), front on right (1-ratio)
     _backPreviewView.hidden = NO;
     _frontPreviewView.hidden = NO;
-    _backPreviewView.frame = CGRectMake(0, 0, w / 2, h);
-    _frontPreviewView.frame = CGRectMake(w / 2, 0, w / 2, h);
+    CGFloat leftW  = w * ratio;
+    CGFloat rightW = w * (1 - ratio);
+    _backPreviewView.frame  = CGRectMake(0, 0, leftW, h);
+    _frontPreviewView.frame = CGRectMake(leftW, 0, rightW, h);
 
   } else if ([_currentLayout isEqualToString:@"sx"]) {
+    // SX: portrait canvas, split top/bottom horizontally
+    // front on top (1-ratio), back on bottom (ratio)
     _backPreviewView.hidden = NO;
     _frontPreviewView.hidden = NO;
-    _frontPreviewView.frame = CGRectMake(0, 0, w, h / 2);
-    _backPreviewView.frame = CGRectMake(0, h / 2, w, h / 2);
+    CGFloat topH    = h * (1 - ratio);
+    CGFloat bottomH = h * ratio;
+    _frontPreviewView.frame = CGRectMake(0, 0, w, topH);
+    _backPreviewView.frame  = CGRectMake(0, topH, w, bottomH);
 
-  } else if ([_currentLayout isEqualToString:@"pip_square"]) {
+  } else if ([_currentLayout isEqualToString:@"pip_square"] || [_currentLayout isEqualToString:@"pip_circle"]) {
     _backPreviewView.hidden = NO;
     _frontPreviewView.hidden = NO;
     _backPreviewView.frame = self.bounds;
-    CGFloat s = MIN(w, h) * 0.28;
-    _frontPreviewView.frame = CGRectMake(w - s - 16, h - s - 160, s, s);
-    _frontPreviewView.layer.cornerRadius = 12;
 
-  } else if ([_currentLayout isEqualToString:@"pip_circle"]) {
-    _backPreviewView.hidden = NO;
-    _frontPreviewView.hidden = NO;
-    _backPreviewView.frame = self.bounds;
-    CGFloat s = 110;
-    _frontPreviewView.frame = CGRectMake(w - s - 16, h - s - 160, s, s);
-    _frontPreviewView.layer.cornerRadius = s / 2;
+    // PiP: size relative to canvas width, position as normalized center
+    CGFloat s = w * self.pipSize;
+    CGFloat cx = w * self.pipPositionX;
+    CGFloat cy = h * self.pipPositionY;
+    // Clamp so pip stays within canvas
+    cx = MAX(s / 2, MIN(w - s / 2, cx));
+    cy = MAX(s / 2, MIN(h - s / 2, cy));
+    _frontPreviewView.frame = CGRectMake(cx - s / 2, cy - s / 2, s, s);
+
+    if ([_currentLayout isEqualToString:@"pip_circle"]) {
+      _frontPreviewView.layer.cornerRadius = s / 2;
+    } else {
+      _frontPreviewView.layer.cornerRadius = 8;
+    }
 
   } else {
     _frontPreviewView.hidden = YES;
@@ -169,9 +236,10 @@
     _backPreviewView.frame = self.bounds;
   }
 
-  _frontPreviewLayer.frame = _frontPreviewView.bounds;
-  _backPreviewLayer.frame = _backPreviewView.bounds;
-  _singlePreviewLayer.frame = [self targetPreviewViewForPosition:self.singleCameraPosition].bounds;
+  // Update preview layer frames to match view frames (nil-safe: layers may not exist yet on first layout)
+  if (_frontPreviewLayer) _frontPreviewLayer.frame = _frontPreviewView.bounds;
+  if (_backPreviewLayer) _backPreviewLayer.frame = _backPreviewView.bounds;
+  if (_singlePreviewLayer) _singlePreviewLayer.frame = [self targetPreviewViewForPosition:self.singleCameraPosition].bounds;
 }
 
 #pragma mark - ObjC Bridge Methods
@@ -279,6 +347,19 @@
 
   [session beginConfiguration];
 
+  // Audio input (microphone)
+  AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+  if (audioDevice) {
+    NSError *audioErr = nil;
+    self.audioInput = [AVCaptureDeviceInput deviceInputWithDevice:audioDevice error:&audioErr];
+    if (self.audioInput && [session canAddInput:self.audioInput]) {
+      [session addInputWithNoConnections:self.audioInput];
+    } else {
+      NSLog(@"[DualCamera] Audio input not available: %@", audioErr.localizedDescription);
+      self.audioInput = nil;
+    }
+  }
+
   if ([session canAddInput:backInput]) {
     [session addInputWithNoConnections:backInput];
   } else {
@@ -350,6 +431,29 @@
     }
   }
 
+  // Front camera movie output (for front-mode recording in multi-cam session)
+  if (ok) {
+    AVCaptureMovieFileOutput *frontMovieOut = [[AVCaptureMovieFileOutput alloc] init];
+    NSString *frontMovieFailure = nil;
+    NSString *frontMovieFailureCode = nil;
+    if (![self addOutput:frontMovieOut
+                 forPort:frontVideoPort
+               toSession:session
+                 failure:&frontMovieFailure
+             failureCode:&frontMovieFailureCode]) {
+      NSLog(@"[DualCamera] Front movie output disabled: %@ (%@)", frontMovieFailure, frontMovieFailureCode);
+      self.frontMovieOutput = nil;
+    } else {
+      self.frontMovieOutput = frontMovieOut;
+    }
+  }
+
+  // Audio → movie output connections (must be inside begin/commitConfiguration block)
+  if (ok && self.audioInput) {
+    [self addAudioConnectionToMovieOutput:self.audioInput output:backMovieOutput session:session];
+    [self addAudioConnectionToMovieOutput:self.audioInput output:self.frontMovieOutput session:session];
+  }
+
   [session commitConfiguration];
 
   if (!ok) {
@@ -413,6 +517,20 @@
   AVCaptureMovieFileOutput *movieOutput = [[AVCaptureMovieFileOutput alloc] init];
 
   [session beginConfiguration];
+
+  // Audio input (microphone)
+  AVCaptureDevice *audioDevice = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+  if (audioDevice) {
+    NSError *audioErr = nil;
+    self.audioInput = [AVCaptureDeviceInput deviceInputWithDevice:audioDevice error:&audioErr];
+    if (self.audioInput && [session canAddInput:self.audioInput]) {
+      [session addInputWithNoConnections:self.audioInput];
+    } else {
+      NSLog(@"[DualCamera] Audio input not available: %@", audioErr.localizedDescription);
+      self.audioInput = nil;
+    }
+  }
+
   BOOL addedInput = NO;
   if ([session canAddInput:input]) {
     [session addInput:input];
@@ -428,6 +546,12 @@
   } else {
     movieOutput = nil;
   }
+
+  // Audio → singleMovieOutput (must be inside begin/commitConfiguration block)
+  if (self.audioInput && movieOutput) {
+    [self addAudioConnectionToMovieOutput:self.audioInput output:movieOutput session:session];
+  }
+
   [session commitConfiguration];
 
   if (!addedInput) {
@@ -529,8 +653,45 @@
   }
   device.activeVideoMinFrameDuration = CMTimeMake(1, 30);
   device.activeVideoMaxFrameDuration = CMTimeMake(1, 30);
+  device.videoZoomFactor = _backZoomFactor;
   [device unlockForConfiguration];
   return YES;
+}
+
+- (void)dc_setFrontZoom:(CGFloat)factor {
+  _frontZoomFactor = factor;
+  dispatch_async(self.sessionQueue, ^{
+    AVCaptureDevice *frontDevice = [self cameraDeviceForPosition:AVCaptureDevicePositionFront];
+    if (!frontDevice) return;
+    if (factor < frontDevice.minAvailableVideoZoomFactor) {
+      factor = frontDevice.minAvailableVideoZoomFactor;
+    } else if (factor > frontDevice.maxAvailableVideoZoomFactor) {
+      factor = frontDevice.maxAvailableVideoZoomFactor;
+    }
+    NSError *err = nil;
+    if ([frontDevice lockForConfiguration:&err]) {
+      frontDevice.videoZoomFactor = factor;
+      [frontDevice unlockForConfiguration];
+    }
+  });
+}
+
+- (void)dc_setBackZoom:(CGFloat)factor {
+  _backZoomFactor = factor;
+  dispatch_async(self.sessionQueue, ^{
+    AVCaptureDevice *backDevice = [self cameraDeviceForPosition:AVCaptureDevicePositionBack];
+    if (!backDevice) return;
+    if (factor < backDevice.minAvailableVideoZoomFactor) {
+      factor = backDevice.minAvailableVideoZoomFactor;
+    } else if (factor > backDevice.maxAvailableVideoZoomFactor) {
+      factor = backDevice.maxAvailableVideoZoomFactor;
+    }
+    NSError *err = nil;
+    if ([backDevice lockForConfiguration:&err]) {
+      backDevice.videoZoomFactor = factor;
+      [backDevice unlockForConfiguration];
+    }
+  });
 }
 
 - (AVCaptureDeviceFormat *)bestMultiCamFormatForDevice:(AVCaptureDevice *)device {
@@ -630,45 +791,544 @@
   return YES;
 }
 
+- (void)addAudioConnectionToMovieOutput:(AVCaptureDeviceInput *)audioInput
+                                 output:(AVCaptureMovieFileOutput *)movieOutput
+                                session:(AVCaptureSession *)session {
+  if (!movieOutput || !audioInput) return;
+
+  for (AVCaptureInputPort *port in audioInput.ports) {
+    if ([port.mediaType isEqualToString:AVMediaTypeAudio]) {
+      AVCaptureConnection *audioConn = [[AVCaptureConnection alloc] initWithInputPorts:@[port] output:movieOutput];
+      if ([session canAddConnection:audioConn]) {
+        [session addConnection:audioConn];
+      }
+      break;
+    }
+  }
+}
+
+#pragma mark - Capture Helpers
+
+- (BOOL)isUsingMultiCamDualLayout {
+  return self.usingMultiCam && [self isDualLayout:self.currentLayout];
+}
+
+- (NSString *)tempPathWithPrefix:(NSString *)prefix {
+  return [NSTemporaryDirectory() stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"%@%ld.mov", prefix, (long)[[NSDate date] timeIntervalSince1970]]];
+}
+
+- (NSString *)saveCIImageAsJPEG:(CIImage *)ciImage {
+  NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"dual_composited_%ld.jpg", (long)[[NSDate date] timeIntervalSince1970]]];
+
+  CIContext *ctx = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+  CGImageRef cgImg = [ctx createCGImage:ciImage fromRect:ciImage.extent];
+  if (!cgImg) return nil;
+
+  UIImage *uiImage = [UIImage imageWithCGImage:cgImg];
+  CGImageRelease(cgImg);
+
+  NSData *jpgData = UIImageJPEGRepresentation(uiImage, 0.9);
+  if (!jpgData) return nil;
+
+  [jpgData writeToFile:path atomically:YES];
+  return path;
+}
+
+- (CIImage *)compositeDualPhotosForCurrentLayout:(CIImage *)front back:(CIImage *)back {
+  // Use preview view bounds as canvas reference (what user sees on screen)
+  CGFloat canvasW = self.bounds.size.width;
+  CGFloat canvasH = self.bounds.size.height;
+
+  if ([self.currentLayout isEqualToString:@"lr"]) {
+    // Left-right: back on left, front on right (portrait canvas)
+    CGFloat halfW = canvasW;
+    CGFloat halfH = canvasH / 2;
+    return [self compositeLRForPhotos:front back:back canvasW:canvasW canvasH:canvasH halfW:halfW halfH:halfH];
+  } else if ([self.currentLayout isEqualToString:@"sx"]) {
+    // Top-bottom: front on top, back on bottom
+    CGFloat halfW = canvasW / 2;
+    CGFloat halfH = canvasH;
+    return [self compositeSXForPhotos:front back:back canvasW:canvasW canvasH:canvasH halfW:halfW halfH:halfH];
+  } else if ([self.currentLayout isEqualToString:@"pip_square"]) {
+    CGFloat s = canvasW * 0.28;
+    return [self compositePIPForPhotos:front back:back canvasW:canvasW canvasH:canvasH
+                             pipRect:CGRectMake(canvasW - s - 16, canvasH - s - 160, s, s)];
+  } else if ([self.currentLayout isEqualToString:@"pip_circle"]) {
+    CGFloat s = canvasW * 0.30;
+    return [self compositePIPForPhotos:front back:back canvasW:canvasW canvasH:canvasH
+                             pipRect:CGRectMake(canvasW - s - 16, canvasH - s - 160, s, s)];
+  }
+
+  return back;
+}
+
+- (CIImage *)compositeLRForPhotos:(CIImage *)front back:(CIImage *)back
+                         canvasW:(CGFloat)canvasW canvasH:(CGFloat)canvasH
+                           halfW:(CGFloat)halfW halfH:(CGFloat)halfH {
+  // Back camera: fill left half (no mirror)
+  CGFloat backOrigW = back.extent.size.width;
+  CGFloat backOrigH = back.extent.size.height;
+  CGFloat backScale = halfH / backOrigH;
+  CIImage *backScaled = [self scaledCIImage:back toSize:CGSizeMake(backOrigW * backScale, backOrigH * backScale)];
+  CGFloat backScaledW = backOrigW * backScale;
+  CGFloat backCropX = MAX(0, (backScaledW - halfW) / 2);
+  CIImage *backLeft = [backScaled imageByCroppingToRect:CGRectMake(backCropX, 0, halfW, halfH)];
+
+  // Front camera: fill right half, mirror horizontally (matches preview)
+  CGFloat frontOrigW = front.extent.size.width;
+  CGFloat frontOrigH = front.extent.size.height;
+  CGFloat frontScale = halfH / frontOrigH;
+  CIImage *frontScaled = [self scaledCIImage:front toSize:CGSizeMake(frontOrigW * frontScale, frontOrigH * frontScale)];
+  CGFloat frontScaledW = frontOrigW * frontScale;
+  CGFloat frontCropX = MAX(0, (frontScaledW - halfW) / 2);
+  CIImage *frontRightRaw = [frontScaled imageByCroppingToRect:CGRectMake(frontCropX, 0, halfW, halfH)];
+  // Mirror: flip around center vertical axis
+  CGFloat cx = halfW;
+  CGAffineTransform mirror = CGAffineTransformConcat(
+    CGAffineTransformMakeTranslation(cx, 0),
+    CGAffineTransformMakeScale(-1, 1));
+  CIImage *frontMirrored = [frontRightRaw imageByApplyingTransform:mirror];
+  CIImage *frontRight = [frontMirrored imageByApplyingTransform:CGAffineTransformMakeTranslation(halfW, 0)];
+
+  CIImage *composited = [backLeft imageByCompositingOverImage:frontRight];
+  return [composited imageByCroppingToRect:CGRectMake(0, 0, canvasW, canvasH)];
+}
+
+- (CIImage *)compositeSXForPhotos:(CIImage *)front back:(CIImage *)back
+                         canvasW:(CGFloat)canvasW canvasH:(CGFloat)canvasH
+                           halfW:(CGFloat)halfW halfH:(CGFloat)halfH {
+  // Front camera: fill top half, mirror horizontally
+  CGFloat frontOrigW = front.extent.size.width;
+  CGFloat frontOrigH = front.extent.size.height;
+  CGFloat frontScale = halfW / frontOrigW;
+  CIImage *frontScaled = [self scaledCIImage:front toSize:CGSizeMake(frontOrigW * frontScale, frontOrigH * frontScale)];
+  CGFloat frontScaledH = frontOrigH * frontScale;
+  CGFloat frontCropY = MAX(0, (frontScaledH - halfH) / 2);
+  CIImage *frontTopRaw = [frontScaled imageByCroppingToRect:CGRectMake(0, frontCropY, halfW, halfH)];
+  // Mirror horizontally
+  CGFloat cx = halfW;
+  CGAffineTransform mirror = CGAffineTransformConcat(
+    CGAffineTransformMakeTranslation(cx, 0),
+    CGAffineTransformMakeScale(-1, 1));
+  CIImage *frontMirrored = [frontTopRaw imageByApplyingTransform:mirror];
+
+  // Back camera: fill bottom half (no mirror)
+  CGFloat backOrigW = back.extent.size.width;
+  CGFloat backOrigH = back.extent.size.height;
+  CGFloat backScale = halfW / backOrigW;
+  CIImage *backScaled = [self scaledCIImage:back toSize:CGSizeMake(backOrigW * backScale, backOrigH * backScale)];
+  CGFloat backScaledH = backOrigH * backScale;
+  CGFloat backCropY = MAX(0, (backScaledH - halfH) / 2);
+  CIImage *backBottom = [backScaled imageByCroppingToRect:CGRectMake(0, backCropY, halfW, halfH)];
+  CIImage *backBottomOffset = [backBottom imageByApplyingTransform:CGAffineTransformMakeTranslation(0, halfH)];
+
+  CIImage *composited = [frontMirrored imageByCompositingOverImage:backBottomOffset];
+  return [composited imageByCroppingToRect:CGRectMake(0, 0, canvasW, canvasH)];
+}
+
+- (CIImage *)compositePIPForPhotos:(CIImage *)front back:(CIImage *)back
+                          canvasW:(CGFloat)canvasW canvasH:(CGFloat)canvasH
+                           pipRect:(CGRect)pipRect {
+  // Back camera: scale to fill canvas (fill)
+  CGFloat backOrigW = back.extent.size.width;
+  CGFloat backOrigH = back.extent.size.height;
+  CGFloat backScale = MAX(canvasW / backOrigW, canvasH / backOrigH);
+  CIImage *backScaled = [self scaledCIImage:back toSize:CGSizeMake(backOrigW * backScale, backOrigH * backScale)];
+  CGFloat backCropX = MAX(0, (backScaled.extent.size.width - canvasW) / 2);
+  CGFloat backCropY = MAX(0, (backScaled.extent.size.height - canvasH) / 2);
+  CIImage *backFull = [backScaled imageByCroppingToRect:CGRectMake(backCropX, backCropY, canvasW, canvasH)];
+
+  // Front camera: scale to fill pip area (fit), mirror horizontally
+  CGFloat frontOrigW = front.extent.size.width;
+  CGFloat frontOrigH = front.extent.size.height;
+  CGFloat frontScale = MAX(pipRect.size.width / frontOrigW, pipRect.size.height / frontOrigH);
+  CIImage *frontScaled = [self scaledCIImage:front toSize:CGSizeMake(frontOrigW * frontScale, frontOrigH * frontScale)];
+  CGFloat frontCropX = MAX(0, (frontScaled.extent.size.width - pipRect.size.width) / 2);
+  CGFloat frontCropY = MAX(0, (frontScaled.extent.size.height - pipRect.size.height) / 2);
+  CIImage *frontCropped = [frontScaled imageByCroppingToRect:CGRectMake(frontCropX, frontCropY, pipRect.size.width, pipRect.size.height)];
+  // Mirror horizontally
+  CGFloat cx = pipRect.size.width;
+  CGAffineTransform mirror = CGAffineTransformConcat(
+    CGAffineTransformMakeTranslation(cx, 0),
+    CGAffineTransformMakeScale(-1, 1));
+  CIImage *frontMirrored = [frontCropped imageByApplyingTransform:mirror];
+  CIImage *pipPlaced = [frontMirrored imageByApplyingTransform:CGAffineTransformMakeTranslation(pipRect.origin.x, pipRect.origin.y)];
+
+  return [[pipPlaced imageByCompositingOverImage:backFull]
+    imageByCroppingToRect:CGRectMake(0, 0, canvasW, canvasH)];
+}
+
+- (CIImage *)scaledCIImage:(CIImage *)image toSize:(CGSize)size {
+  CGFloat scaleX = size.width / image.extent.size.width;
+  CGFloat scaleY = size.height / image.extent.size.height;
+  CIFilter *scaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+  [scaleFilter setValue:image forKey:kCIInputImageKey];
+  [scaleFilter setValue:@(scaleX) forKey:kCIInputScaleKey];
+  [scaleFilter setValue:@(1.0) forKey:kCIInputAspectRatioKey];
+  return scaleFilter.outputImage ?: image;
+}
+
+- (NSString *)documentsPathWithPrefix:(NSString *)prefix {
+  NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+  return [paths.firstObject stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"%@%ld.mp4", prefix, (long)[[NSDate date] timeIntervalSince1970]]];
+}
+
+- (AVMutableVideoCompositionLayerInstruction *)layerForTrack:(AVMutableCompositionTrack *)track {
+  if (!track) return nil;
+  return [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
+}
+
+- (NSArray<AVMutableVideoCompositionLayerInstruction *> *)layersWithBack:(AVMutableCompositionTrack *)backTrack front:(AVMutableCompositionTrack *)frontTrack {
+  NSMutableArray *layers = [NSMutableArray array];
+  AVMutableVideoCompositionLayerInstruction *back = [self layerForTrack:backTrack];
+  AVMutableVideoCompositionLayerInstruction *front = [self layerForTrack:frontTrack];
+  if (back) [layers addObject:back];
+  if (front) [layers addObject:front];
+  return layers;
+}
+
+- (CGSize)videoSizeForAsset:(AVURLAsset *)asset {
+  NSArray<AVAssetTrack *> *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+  if (videoTracks.count > 0) {
+    return videoTracks.firstObject.naturalSize;
+  }
+  return CGSizeMake(1080, 1920);
+}
+
+- (NSString *)compositeDualVideosForCurrentLayout:(NSString *)frontPath backPath:(NSString *)backPath {
+  NSURL *frontURL = [NSURL fileURLWithPath:frontPath];
+  NSURL *backURL  = [NSURL fileURLWithPath:backPath];
+
+  if (![[NSFileManager defaultManager] fileExistsAtPath:frontPath] ||
+      ![[NSFileManager defaultManager] fileExistsAtPath:backPath]) {
+    NSLog(@"[DualCamera] One of the recording files is missing");
+    return backPath;
+  }
+
+  AVURLAsset *frontAsset = [AVURLAsset assetWithURL:frontURL];
+  AVURLAsset *backAsset  = [AVURLAsset assetWithURL:backURL];
+
+  CMTime duration = backAsset.duration;
+  // Use canvas size from recording start (portrait=竖屏, landscape=横屏)
+  CGFloat canvasW = self.canvasSizeAtRecording.width;
+  CGFloat canvasH = self.canvasSizeAtRecording.height;
+  if (canvasW == 0 || canvasH == 0) {
+    // Fallback to video native size if not captured
+    CGSize videoSize = [self videoSizeForAsset:backAsset];
+    canvasW = videoSize.width;
+    canvasH = videoSize.height;
+  }
+
+  AVMutableComposition *composition = [AVMutableComposition composition];
+
+  // Audio track from back video
+  NSArray *backAudioTracks = [backAsset tracksWithMediaType:AVMediaTypeAudio];
+  if (backAudioTracks.count > 0) {
+    AVMutableCompositionTrack *audioTrack = [composition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                                     preferredTrackID:kCMPersistentTrackID_Invalid];
+    [audioTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, duration)
+                        ofTrack:backAudioTracks.firstObject
+                         atTime:kCMTimeZero
+                          error:nil];
+  }
+
+  // Front video track
+  NSArray<AVAssetTrack *> *frontVideoTracks = [frontAsset tracksWithMediaType:AVMediaTypeVideo];
+  AVMutableCompositionTrack *frontVideoTrack = nil;
+  AVMutableCompositionTrack *backVideoTrack  = nil;
+
+  if (frontVideoTracks.count > 0) {
+    frontVideoTrack = [composition addMutableTrackWithMediaType:AVMediaTypeVideo
+                                               preferredTrackID:kCMPersistentTrackID_Invalid];
+    [frontVideoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, duration)
+                             ofTrack:frontVideoTracks.firstObject
+                              atTime:kCMTimeZero
+                               error:nil];
+  }
+
+  NSArray<AVAssetTrack *> *backVideoTracks = [backAsset tracksWithMediaType:AVMediaTypeVideo];
+  if (backVideoTracks.count > 0) {
+    backVideoTrack = [composition addMutableTrackWithMediaType:AVMediaTypeVideo
+                                              preferredTrackID:kCMPersistentTrackID_Invalid];
+    [backVideoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, duration)
+                            ofTrack:backVideoTracks.firstObject
+                             atTime:kCMTimeZero
+                              error:nil];
+  }
+
+  // Build video composition for layout using canvas dimensions
+  AVMutableVideoComposition *videoComp = [AVMutableVideoComposition videoComposition];
+  videoComp.renderSize = CGSizeMake(canvasW, canvasH);
+  videoComp.frameDuration = CMTimeMake(1, 30);
+
+  CMTimeRange timeRange = CMTimeRangeMake(kCMTimeZero, duration);
+
+  // Reference sizes for transform calculation (use back camera as reference)
+  CGSize refSize = [self videoSizeForAsset:backAsset];
+  CGFloat refW = refSize.width;
+  CGFloat refH = refSize.height;
+  CGFloat ratio = self.dualLayoutRatio > 0 ? self.dualLayoutRatio : 0.5;
+
+  if ([self.currentLayout isEqualToString:@"lr"]) {
+    // LR: portrait canvas (canvasW < canvasH), split left/right vertically
+    // back on left, front on right
+    CGFloat leftWidth  = canvasW * ratio;   // ratio = back proportion
+    CGFloat rightWidth = canvasW * (1 - ratio);
+
+    // Back (left): fill by height, center horizontally
+    CGFloat backScale = canvasH / refH;
+    CGFloat backFillW = refW * backScale;
+    CGFloat backOffsetX = (leftWidth - backFillW) / 2; // center in left half
+
+    // Front (right): fill by height, center in right half, mirror
+    CGFloat frontScale = canvasH / refH;
+    CGFloat frontFillW = refW * frontScale;
+    CGFloat frontOffsetX = leftWidth + (rightWidth - frontFillW) / 2;
+
+    CGAffineTransform backTransform = CGAffineTransformMakeScale(backScale, backScale);
+    backTransform = CGAffineTransformTranslate(backTransform, backOffsetX, 0);
+    CGAffineTransform frontTransform = CGAffineTransformMakeScale(frontScale, frontScale);
+    frontTransform = CGAffineTransformTranslate(frontTransform, frontOffsetX, 0);
+
+    if (backVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *backLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:backVideoTrack];
+      [backLayer setTransform:backTransform atTime:kCMTimeZero];
+    }
+    if (frontVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *frontLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:frontVideoTrack];
+      [frontLayer setTransform:frontTransform atTime:kCMTimeZero];
+    }
+
+    AVMutableVideoCompositionInstruction *instruction =
+      [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange = timeRange;
+    instruction.layerInstructions = [self layersWithBack:backVideoTrack front:frontVideoTrack];
+    videoComp.instructions = @[instruction];
+
+  } else if ([self.currentLayout isEqualToString:@"sx"]) {
+    // SX: portrait canvas (canvasW < canvasH), split top/bottom horizontally
+    // front on top, back on bottom
+    CGFloat topHeight    = canvasH * (1 - ratio);  // front proportion
+    CGFloat bottomHeight = canvasH * ratio;          // back proportion
+
+    // Front (top): fill by width, center vertically
+    CGFloat frontScale = canvasW / refW;
+    CGFloat frontFillH = refH * frontScale;
+    CGFloat frontOffsetY = (topHeight - frontFillH) / 2;
+
+    // Back (bottom): fill by width, center in bottom half
+    CGFloat backScale = canvasW / refW;
+    CGFloat backFillH = refH * backScale;
+    CGFloat backOffsetY = topHeight + (bottomHeight - backFillH) / 2;
+
+    CGAffineTransform frontTransform = CGAffineTransformMakeScale(frontScale, frontScale);
+    frontTransform = CGAffineTransformTranslate(frontTransform, 0, frontOffsetY);
+    CGAffineTransform backTransform = CGAffineTransformMakeScale(backScale, backScale);
+    backTransform = CGAffineTransformTranslate(backTransform, 0, backOffsetY);
+
+    if (backVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *backLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:backVideoTrack];
+      [backLayer setTransform:backTransform atTime:kCMTimeZero];
+    }
+    if (frontVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *frontLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:frontVideoTrack];
+      [frontLayer setTransform:frontTransform atTime:kCMTimeZero];
+    }
+
+    AVMutableVideoCompositionInstruction *instruction =
+      [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange = timeRange;
+    instruction.layerInstructions = [self layersWithBack:frontVideoTrack front:backVideoTrack];
+    videoComp.instructions = @[instruction];
+
+  } else {
+    // pip_square / pip_circle: back full screen, front as corner overlay
+    CGFloat s = canvasW * self.pipSize;
+    CGFloat pipX = canvasW * self.pipPositionX - s / 2;
+    CGFloat pipY = canvasH * self.pipPositionY - s / 2;
+
+    // Back: scale to fill canvas (fill)
+    CGFloat backScaleX = canvasW / refW;
+    CGFloat backScaleY = canvasH / refH;
+    CGFloat backScale = MAX(backScaleX, backScaleY);
+    CGFloat backFillW = refW * backScale;
+    CGFloat backFillH = refH * backScale;
+    CGFloat backOffsetX = (canvasW - backFillW) / 2;
+    CGFloat backOffsetY = (canvasH - backFillH) / 2;
+    CGAffineTransform backTransform = CGAffineTransformMakeScale(backScale, backScale);
+    backTransform = CGAffineTransformTranslate(backTransform, backOffsetX, backOffsetY);
+
+    // Front: scale to fit pip area (fit), position in corner
+    CGFloat frontScaleX = s / refW;
+    CGFloat frontScaleY = s / refH;
+    CGFloat frontScale = MIN(frontScaleX, frontScaleY);
+    CGFloat frontFillW = refW * frontScale;
+    CGFloat frontFillH = refH * frontScale;
+    CGFloat frontOffsetX = pipX + (s - frontFillW) / 2;
+    CGFloat frontOffsetY = pipY + (s - frontFillH) / 2;
+    CGAffineTransform frontTransform = CGAffineTransformMakeScale(frontScale, frontScale);
+    frontTransform = CGAffineTransformTranslate(frontTransform, frontOffsetX, frontOffsetY);
+
+    if (backVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *backLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:backVideoTrack];
+      [backLayer setTransform:backTransform atTime:kCMTimeZero];
+    }
+    if (frontVideoTrack) {
+      AVMutableVideoCompositionLayerInstruction *frontLayer =
+        [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:frontVideoTrack];
+      [frontLayer setTransform:frontTransform atTime:kCMTimeZero];
+    }
+
+    AVMutableVideoCompositionInstruction *instruction =
+      [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange = timeRange;
+    instruction.layerInstructions = [self layersWithBack:backVideoTrack front:frontVideoTrack];
+    videoComp.instructions = @[instruction];
+  }
+
+  NSString *outPath = [self documentsPathWithPrefix:@"dual_composited_"];
+  self.videoExportSession =
+    [[AVAssetExportSession alloc] initWithAsset:composition
+                                presetName:AVAssetExportPresetHighestQuality];
+  self.videoExportSession.outputURL = [NSURL fileURLWithPath:outPath];
+  self.videoExportSession.outputFileType = AVFileTypeMPEG4;
+  self.videoExportSession.videoComposition = videoComp;
+
+  dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+  __block NSString *resultPath = nil;
+
+  [self.videoExportSession exportAsynchronouslyWithCompletionHandler:^{
+    if (self.videoExportSession.status == AVAssetExportSessionStatusCompleted) {
+      resultPath = outPath;
+    } else {
+      NSLog(@"[DualCamera] Video export failed: %@", self.videoExportSession.error);
+      resultPath = backPath; // fallback to back video only
+    }
+    self.videoExportSession = nil;
+    dispatch_semaphore_signal(sema);
+  }];
+
+  dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+  return resultPath;
+}
+
 #pragma mark - Capture
 
 - (void)internalTakePhoto {
   dispatch_async(self.sessionQueue, ^{
-    AVCapturePhotoOutput *output = [self photoOutputForCurrentLayout];
-    if (!output) {
-      [self emitError:@"Photo output not available"];
-      return;
-    }
+    if (!self.isConfigured) return;
 
-    AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettings];
-    settings.flashMode = AVCaptureFlashModeOff;
-    [output capturePhotoWithSettings:settings delegate:self];
+    if (self.usingMultiCam && [self isDualLayout:self.currentLayout]) {
+      // Dual-cam: use canvas snapshot for WYSIWYG (what you see = what you get)
+      // The preview layers already handle orientation/mirroring/scaling correctly,
+      // so rendering the view gives us the exact saved image
+      dispatch_async(dispatch_get_main_queue(), ^{
+        UIImage *snapshot = [self captureCanvasSnapshot];
+        NSString *path = [self saveImageAsJPEG:snapshot];
+        if (path) {
+          [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
+        } else {
+          [self emitError:@"Failed to capture canvas snapshot"];
+        }
+      });
+    } else {
+      // Single-cam: use photo output for full-resolution
+      AVCapturePhotoOutput *output = [self photoOutputForCurrentLayout];
+      if (!output) {
+        [self emitError:@"Photo output not available"];
+        return;
+      }
+      AVCapturePhotoSettings *settings = [AVCapturePhotoSettings photoSettings];
+      settings.flashMode = AVCaptureFlashModeOff;
+      [output capturePhotoWithSettings:settings delegate:self];
+    }
   });
+}
+
+- (UIImage *)captureCanvasSnapshot {
+  UIGraphicsBeginImageContextWithOptions(self.bounds.size, YES, [UIScreen mainScreen].scale);
+  CGContextRef ctx = UIGraphicsGetCurrentContext();
+  [self.layer renderInContext:ctx];
+  UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+  UIGraphicsEndImageContext();
+  return img;
+}
+
+- (NSString *)saveImageAsJPEG:(UIImage *)image {
+  if (!image) return nil;
+  NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+  NSString *docs = paths.firstObject;
+  NSString *path = [docs stringByAppendingPathComponent:
+    [NSString stringWithFormat:@"dual_photo_%ld.jpg", (long)[[NSDate date] timeIntervalSince1970]]];
+  NSData *jpg = UIImageJPEGRepresentation(image, 0.9);
+  [jpg writeToFile:path atomically:YES];
+  return path;
 }
 
 - (void)internalStartRecording {
   dispatch_async(self.sessionQueue, ^{
-    AVCaptureMovieFileOutput *output = [self movieOutputForCurrentLayout];
-    if (!output) {
-      [self emitRecordingError:@"Video recording is currently available only for the active single camera or the back camera stream in dual mode."];
-      return;
-    }
+    if (!self.isConfigured) return;
 
-    if (output.isRecording) {
-      return;
-    }
+    if (self.usingMultiCam && [self isDualLayout:self.currentLayout]) {
+      // Canvas size captured from self.bounds (main thread safe since bounds doesn't change during recording)
+      self.canvasSizeAtRecording = self.bounds.size;
 
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
-      [NSString stringWithFormat:@"dual_%ld.mov", (long)[[NSDate date] timeIntervalSince1970]]];
-    [output startRecordingToOutputFileURL:[NSURL fileURLWithPath:path] recordingDelegate:self];
+      // Dual-cam: record both simultaneously
+      if (self.isDualRecordingActive) return; // prevent double-start
+      self.isDualRecordingActive = YES;
+      self.backRecordingFinished = NO;
+      self.frontRecordingFinished = NO;
+
+      self.backRecordingPath = [self tempPathWithPrefix:@"dual_back_"];
+      self.frontRecordingPath = [self tempPathWithPrefix:@"dual_front_"];
+
+      [self.backMovieOutput startRecordingToOutputFileURL:
+        [NSURL fileURLWithPath:self.backRecordingPath] recordingDelegate:self];
+      [self.frontMovieOutput startRecordingToOutputFileURL:
+        [NSURL fileURLWithPath:self.frontRecordingPath] recordingDelegate:self];
+    } else {
+      // Single-cam
+      self.canvasSizeAtRecording = self.bounds.size;
+      AVCaptureMovieFileOutput *output = [self movieOutputForCurrentLayout];
+      if (!output) {
+        [self emitRecordingError:@"Video recording is currently available only for the active single camera or the back camera stream in dual mode."];
+        return;
+      }
+      if (output.isRecording) return;
+
+      NSString *path = [self tempPathWithPrefix:@"dual_"];
+      [output startRecordingToOutputFileURL:[NSURL fileURLWithPath:path] recordingDelegate:self];
+    }
   });
 }
 
 - (void)internalStopRecording {
   dispatch_async(self.sessionQueue, ^{
-    AVCaptureMovieFileOutput *output = [self activeRecordingOutput];
-    if (output.isRecording) {
-      [output stopRecording];
+    if (!self.isConfigured) return;
+
+    if (self.usingMultiCam && [self isDualLayout:self.currentLayout]) {
+      // Stop both recordings
+      if (self.backMovieOutput.isRecording) {
+        [self.backMovieOutput stopRecording];
+      }
+      if (self.frontMovieOutput.isRecording) {
+        [self.frontMovieOutput stopRecording];
+      }
+      // NOTE: isDualRecordingActive cleared when both outputs finish (in delegate)
+    } else {
+      // Single-cam
+      AVCaptureMovieFileOutput *output = [self activeRecordingOutput];
+      if (output.isRecording) {
+        [output stopRecording];
+      }
     }
   });
 }
@@ -682,13 +1342,18 @@
 
 - (AVCaptureMovieFileOutput *)movieOutputForCurrentLayout {
   if (self.usingMultiCam) {
-    return [self primaryCameraPosition] == AVCaptureDevicePositionBack ? self.backMovieOutput : nil;
+    if ([self primaryCameraPosition] == AVCaptureDevicePositionBack) {
+      return self.backMovieOutput;
+    } else {
+      return self.frontMovieOutput;
+    }
   }
   return self.singleMovieOutput;
 }
 
 - (AVCaptureMovieFileOutput *)activeRecordingOutput {
   if (self.backMovieOutput.isRecording) return self.backMovieOutput;
+  if (self.frontMovieOutput.isRecording) return self.frontMovieOutput;
   if (self.singleMovieOutput.isRecording) return self.singleMovieOutput;
   return nil;
 }
@@ -780,7 +1445,6 @@
 - (void)captureOutput:(AVCapturePhotoOutput *)output
     didFinishProcessingPhoto:(AVCapturePhoto *)photo
                        error:(NSError *)error {
-
   if (error) {
     [self emitError:error.localizedDescription];
     return;
@@ -792,15 +1456,45 @@
     return;
   }
 
+  // Dual-cam photo compositing
+  if (self.usingMultiCam && [self isDualLayout:self.currentLayout]) {
+    CIImage *ciImage = [CIImage imageWithData:data];
+    if (!ciImage) {
+      [self emitError:@"Failed to create CIImage"];
+      return;
+    }
+
+    NSString *key = (output == self.backPhotoOutput) ? @"back" : @"front";
+    self.pendingDualPhotos[key] = ciImage;
+    if (output == self.backPhotoOutput) self.pendingDualPhotosBack = YES;
+    if (output == self.frontPhotoOutput) self.pendingDualPhotosFront = YES;
+
+    // Both images received
+    if (self.pendingDualPhotosBack && self.pendingDualPhotosFront) {
+      CIImage *frontImg = self.pendingDualPhotos[@"front"];
+      CIImage *backImg  = self.pendingDualPhotos[@"back"];
+      [self.pendingDualPhotos removeAllObjects];
+
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        CIImage *composited = [self compositeDualPhotosForCurrentLayout:frontImg back:backImg];
+        NSString *path = [self saveCIImageAsJPEG:composited];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (path) {
+            [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
+          } else {
+            [self emitError:@"Failed to save composited photo"];
+          }
+        });
+      });
+    }
+    return;
+  }
+
+  // Single-cam mode: save directly
   NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
     [NSString stringWithFormat:@"dual_photo_%ld.jpg", (long)[[NSDate date] timeIntervalSince1970]]];
-  NSError *writeErr = nil;
-  [data writeToFile:path options:NSDataWritingAtomic error:&writeErr];
-  if (writeErr) {
-    [self emitError:writeErr.localizedDescription];
-  } else {
-    [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
-  }
+  [data writeToFile:path atomically:YES];
+  [self emitPhotoSaved:[NSString stringWithFormat:@"file://%@", path]];
 }
 
 #pragma mark - AVCaptureFileOutputRecordingDelegate
@@ -810,16 +1504,70 @@
                         fromConnections:(NSArray<AVCaptureConnection *> *)connections
                                   error:(NSError *)error {
   if (error) {
+    // Error case: stop the other recording and reset
+    if (self.isDualRecordingActive) {
+      if (output == self.backMovieOutput && self.frontMovieOutput.isRecording) {
+        [self.frontMovieOutput stopRecording];
+      }
+      if (output == self.frontMovieOutput && self.backMovieOutput.isRecording) {
+        [self.backMovieOutput stopRecording];
+      }
+      self.isDualRecordingActive = NO;
+      self.backRecordingPath = nil;
+      self.frontRecordingPath = nil;
+    }
     [self emitRecordingError:error.localizedDescription];
-  } else {
-    [self emitRecordingFinished:fileURL.absoluteString];
+    return;
   }
+
+  if (self.isDualRecordingActive) {
+    // Mark which output finished
+    if (output == self.backMovieOutput) {
+      self.backRecordingFinished = YES;
+    } else if (output == self.frontMovieOutput) {
+      self.frontRecordingFinished = YES;
+    }
+
+    // Both recordings finished: trigger compositing
+    if (self.backRecordingFinished && self.frontRecordingFinished) {
+      self.backRecordingFinished = NO;
+      self.frontRecordingFinished = NO;
+      self.isDualRecordingActive = NO;
+
+      NSString *backPath = self.backRecordingPath;
+      NSString *frontPath = self.frontRecordingPath;
+
+      dispatch_async(self.compositingQueue, ^{
+        NSString *composited = [self compositeDualVideosForCurrentLayout:frontPath backPath:backPath];
+
+        [[NSFileManager defaultManager] removeItemAtPath:frontPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:backPath error:nil];
+        self.frontRecordingPath = nil;
+        self.backRecordingPath = nil;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (composited) {
+            [self emitRecordingFinished:[NSString stringWithFormat:@"file://%@", composited]];
+          } else {
+            [self emitRecordingError:@"Failed to composite video"];
+          }
+        });
+      });
+    }
+    return;
+  }
+
+  // Single-cam mode: emit directly
+  [self emitRecordingFinished:fileURL.absoluteString];
 }
 
 - (void)dealloc {
   [self unregisterSessionNotifications];
+  // Stop sessions synchronously on current thread to avoid queue deadlock during dealloc
   [_multiCamSession stopRunning];
   [_singleSession stopRunning];
+  _isConfigured = NO;
+  _videoExportSession = nil;
 }
 
 @end
