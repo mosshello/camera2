@@ -303,23 +303,21 @@
   }
 
   AVCaptureMultiCamSession *session = [[AVCaptureMultiCamSession alloc] init];
-  __block AVCaptureVideoPreviewLayer *backLayer = nil;
-  __block AVCaptureVideoPreviewLayer *frontLayer = nil;
   dispatch_sync(dispatch_get_main_queue(), ^{
     [self removePreviewLayers];
 
-    backLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
-    backLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-    backLayer.frame = self.backPreviewView.bounds;
-    [self.backPreviewView.layer addSublayer:backLayer];
+    AVCaptureVideoPreviewLayer *bl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
+    bl.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    bl.frame = self.backPreviewView.bounds;
+    [self.backPreviewView.layer addSublayer:bl];
+    self.backPreviewLayer = bl;
 
-    frontLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
-    frontLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
-    frontLayer.frame = self.frontPreviewView.bounds;
-    [self.frontPreviewView.layer addSublayer:frontLayer];
+    AVCaptureVideoPreviewLayer *fl = [[AVCaptureVideoPreviewLayer alloc] initWithSessionWithNoConnection:session];
+    fl.videoGravity = AVLayerVideoGravityResizeAspectFill;
+    fl.frame = self.frontPreviewView.bounds;
+    [self.frontPreviewView.layer addSublayer:fl];
+    self.frontPreviewLayer = fl;
 
-    self.backPreviewLayer = backLayer;
-    self.frontPreviewLayer = frontLayer;
     [self updateLayout];
   });
 
@@ -385,7 +383,7 @@
   }
 
   if (ok) {
-    ok = [self addPreviewLayer:backLayer
+    ok = [self addPreviewLayer:self.backPreviewLayer
                       forPort:backVideoPort
                     toSession:session
                   mirrorVideo:NO
@@ -394,7 +392,7 @@
   }
 
   if (ok) {
-    ok = [self addPreviewLayer:frontLayer
+    ok = [self addPreviewLayer:self.frontPreviewLayer
                       forPort:frontVideoPort
                     toSession:session
                   mirrorVideo:YES
