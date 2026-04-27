@@ -1376,20 +1376,15 @@
   CGFloat backCropX = MAX(0, (backScaledW - leftW) / 2);
   CIImage *backLeft = [backScaled imageByCroppingToRect:CGRectMake(backCropX, 0, leftW, canvasH)];
 
-  // Front (right): fill by height, crop, mirror, translate
+  // Front (right): fill by height, crop, translate (front is already mirrored in captureOutput)
   CGFloat frontOrigW = front.extent.size.width;
   CGFloat frontOrigH = front.extent.size.height;
   CGFloat frontScale = canvasH / frontOrigH;
   CIImage *frontScaled = [self scaledCIImage:front toSize:CGSizeMake(frontOrigW * frontScale, frontOrigH * frontScale)];
   CGFloat frontScaledW = frontOrigW * frontScale;
   CGFloat frontCropX = MAX(0, (frontScaledW - rightW) / 2);
-  CIImage *frontRightRaw = [frontScaled imageByCroppingToRect:CGRectMake(frontCropX, 0, rightW, canvasH)];
-  CGFloat cx = rightW;
-  CGAffineTransform mirror = CGAffineTransformConcat(
-    CGAffineTransformMakeTranslation(cx, 0),
-    CGAffineTransformMakeScale(-1, 1));
-  CIImage *frontMirrored = [frontRightRaw imageByApplyingTransform:mirror];
-  CIImage *frontRight = [frontMirrored imageByApplyingTransform:CGAffineTransformMakeTranslation(leftW, 0)];
+  CIImage *frontRight = [frontScaled imageByCroppingToRect:CGRectMake(frontCropX, 0, rightW, canvasH)];
+  CIImage *frontRightOffset = [frontRight imageByApplyingTransform:CGAffineTransformMakeTranslation(leftW, 0)];
 
   return [backLeft imageByCompositingOverImage:frontRight];
 }
@@ -1397,17 +1392,12 @@
 - (CIImage *)compositeSXFront:(CIImage *)front back:(CIImage *)back
                       canvasW:(CGFloat)canvasW canvasH:(CGFloat)canvasH
                         topH:(CGFloat)topH bottomH:(CGFloat)bottomH {
-  // Front (top): fill by width, crop from top, mirror, no vertical translate
+  // Front (top): fill by width, crop from top, no mirror (front is already mirrored in captureOutput)
   CGFloat frontOrigW = front.extent.size.width;
   CGFloat frontOrigH = front.extent.size.height;
   CGFloat frontScale = canvasW / frontOrigW;
   CIImage *frontScaled = [self scaledCIImage:front toSize:CGSizeMake(canvasW, frontOrigH * frontScale)];
-  CIImage *frontTopRaw = [frontScaled imageByCroppingToRect:CGRectMake(0, 0, canvasW, topH)];
-  CGFloat cx = canvasW;
-  CGAffineTransform mirror = CGAffineTransformConcat(
-    CGAffineTransformMakeTranslation(cx, 0),
-    CGAffineTransformMakeScale(-1, 1));
-  CIImage *frontMirrored = [frontTopRaw imageByApplyingTransform:mirror];
+  CIImage *frontTop = [frontScaled imageByCroppingToRect:CGRectMake(0, 0, canvasW, topH)];
 
   // Back (bottom): fill by width, crop from top, translate down by topH
   CGFloat backOrigW = back.extent.size.width;
@@ -1417,7 +1407,7 @@
   CIImage *backBottomRaw = [backScaled imageByCroppingToRect:CGRectMake(0, 0, canvasW, bottomH)];
   CIImage *backBottom = [backBottomRaw imageByApplyingTransform:CGAffineTransformMakeTranslation(0, topH)];
 
-  return [frontMirrored imageByCompositingOverImage:backBottom];
+  return [frontTop imageByCompositingOverImage:backBottom];
 }
 
 - (CIImage *)compositePIPFront:(CIImage *)front back:(CIImage *)back
@@ -1432,7 +1422,7 @@
   CGFloat backCropY = MAX(0, (backScaled.extent.size.height - canvasH) / 2);
   CIImage *backFull = [backScaled imageByCroppingToRect:CGRectMake(backCropX, backCropY, canvasW, canvasH)];
 
-  // Front: fit into pip rect, mirror, translate
+  // Front: fit into pip rect, translate (front is already mirrored in captureOutput)
   CGFloat frontOrigW = front.extent.size.width;
   CGFloat frontOrigH = front.extent.size.height;
   CGFloat frontScale = MIN(pipRect.size.width / frontOrigW, pipRect.size.height / frontOrigH);
@@ -1440,12 +1430,7 @@
   CGFloat frontCropX = MAX(0, (frontScaled.extent.size.width - pipRect.size.width) / 2);
   CGFloat frontCropY = MAX(0, (frontScaled.extent.size.height - pipRect.size.height) / 2);
   CIImage *frontCropped = [frontScaled imageByCroppingToRect:CGRectMake(frontCropX, frontCropY, pipRect.size.width, pipRect.size.height)];
-  CGFloat cx = pipRect.size.width;
-  CGAffineTransform mirror = CGAffineTransformConcat(
-    CGAffineTransformMakeTranslation(cx, 0),
-    CGAffineTransformMakeScale(-1, 1));
-  CIImage *frontMirrored = [frontCropped imageByApplyingTransform:mirror];
-  CIImage *pipPlaced = [frontMirrored imageByApplyingTransform:CGAffineTransformMakeTranslation(pipRect.origin.x, pipRect.origin.y)];
+  CIImage *pipPlaced = [frontCropped imageByApplyingTransform:CGAffineTransformMakeTranslation(pipRect.origin.x, pipRect.origin.y)];
 
   return [pipPlaced imageByCompositingOverImage:backFull];
 }
