@@ -660,14 +660,15 @@
   dispatch_async(self.sessionQueue, ^{
     AVCaptureDevice *frontDevice = [self cameraDeviceForPosition:AVCaptureDevicePositionFront];
     if (!frontDevice) return;
-    if (factor < frontDevice.minAvailableVideoZoomFactor) {
-      factor = frontDevice.minAvailableVideoZoomFactor;
-    } else if (factor > frontDevice.maxAvailableVideoZoomFactor) {
-      factor = frontDevice.maxAvailableVideoZoomFactor;
+    CGFloat f = factor;
+    if (f < frontDevice.minAvailableVideoZoomFactor) {
+      f = frontDevice.minAvailableVideoZoomFactor;
+    } else if (f > frontDevice.maxAvailableVideoZoomFactor) {
+      f = frontDevice.maxAvailableVideoZoomFactor;
     }
     NSError *err = nil;
     if ([frontDevice lockForConfiguration:&err]) {
-      frontDevice.videoZoomFactor = factor;
+      frontDevice.videoZoomFactor = f;
       [frontDevice unlockForConfiguration];
     }
   });
@@ -678,14 +679,15 @@
   dispatch_async(self.sessionQueue, ^{
     AVCaptureDevice *backDevice = [self cameraDeviceForPosition:AVCaptureDevicePositionBack];
     if (!backDevice) return;
-    if (factor < backDevice.minAvailableVideoZoomFactor) {
-      factor = backDevice.minAvailableVideoZoomFactor;
-    } else if (factor > backDevice.maxAvailableVideoZoomFactor) {
-      factor = backDevice.maxAvailableVideoZoomFactor;
+    CGFloat f = factor;
+    if (f < backDevice.minAvailableVideoZoomFactor) {
+      f = backDevice.minAvailableVideoZoomFactor;
+    } else if (f > backDevice.maxAvailableVideoZoomFactor) {
+      f = backDevice.maxAvailableVideoZoomFactor;
     }
     NSError *err = nil;
     if ([backDevice lockForConfiguration:&err]) {
-      backDevice.videoZoomFactor = factor;
+      backDevice.videoZoomFactor = f;
       [backDevice unlockForConfiguration];
     }
   });
