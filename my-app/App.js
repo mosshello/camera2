@@ -50,6 +50,7 @@ if (DualCameraEventEmitter) {
 
 export default function App() {
   const [cameraMode, setCameraMode] = useState(CAMERA_MODE.BACK);
+  const { width: screenWidth, height: screenHeight } = require('react-native').Dimensions.get('window');
   const [captureMode, setCaptureMode] = useState('picture');
   const [saving, setSaving] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -67,6 +68,10 @@ export default function App() {
   const [backZoom, setBackZoom] = useState(1.0);
   const [showAdjustment, setShowAdjustment] = useState(false);
   const [saveAspectRatio, setSaveAspectRatio] = useState('9:16');
+  // Flip state: true = front swapped with back (layout-dependent)
+  const [isFlipped, setIsFlipped] = useState(false);
+  // LR/SX zoom target: 'primary' = main area camera (back), 'secondary' = other camera (front)
+  const [activeZoomTarget, setActiveZoomTarget] = useState('primary');
 
   // 检查相机权限
   useEffect(() => {
@@ -160,6 +165,14 @@ export default function App() {
       setAudioLevel(event.average ?? 0);
     });
 
+    const subPipPositionChanged = eventEmitter.addListener('onPipPositionChanged', (event) => {
+      setPipPosition({ x: event.x ?? 0.85, y: event.y ?? 0.80 });
+    });
+
+    const subPipSizeChanged = eventEmitter.addListener('onPipSizeChanged', (event) => {
+      setPipSize(event.size ?? 0.28);
+    });
+
     return () => {
       subPhotoSaved.remove();
       subPhotoError.remove();
@@ -167,6 +180,8 @@ export default function App() {
       subRecordingError.remove();
       subSessionError.remove();
       subAudioLevel.remove();
+      subPipPositionChanged.remove();
+      subPipSizeChanged.remove();
     };
   }, [ensureMediaPermission]);
 
@@ -225,13 +240,34 @@ export default function App() {
     }
   }, [recording, captureMode, takePhoto, startRecording, stopRecording]);
 
+  const handleFlip = useCallback(() => {
+    if (!DualCameraModule?.flipCamera) return;
+    DualCameraModule.flipCamera();
+    setIsFlipped(v => !v);
+  }, []);
+
+  const effectiveCamera = (() => {
+    if (cameraMode === CAMERA_MODE.BACK) return 'back';
+    if (cameraMode === CAMERA_MODE.FRONT) return 'front';
+    // LR/SX: camera controlled by activeZoomTarget
+    if (cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX) {
+      return activeZoomTarget === 'primary' ? 'back' : 'front';
+    }
+    // PiP: controls the small window camera (not the main view)
+    // pipMainIsBack=!isFlipped, small window is the camera that is NOT the main view
+    return isFlipped ? 'back' : 'front';
+  })();
+
+  const effectiveZoomLevels = effectiveCamera === 'back' ? [0.5, 1.0, 2.0, 3.0, 5.0] : [1.0, 2.0];
+
   const handleModeSwitch = useCallback((mode) => {
     setCameraMode(mode);
-    // Reset adjustment to defaults when switching modes
     setDualLayoutRatio(0.5);
     setPipSize(0.28);
     setPipPosition({ x: 0.85, y: 0.80 });
+    setActiveZoomTarget('primary');
     setShowAdjustment(false);
+    setIsFlipped(false);
   }, []);
 
   // 加载中
@@ -283,6 +319,8 @@ export default function App() {
           pipSize={cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE ? pipSize : 0.28}
           pipPositionX={pipPosition.x}
           pipPositionY={pipPosition.y}
+          sxBackOnTop={cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX ? !isFlipped : true}
+          pipMainIsBack={cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE ? !isFlipped : true}
         />
       ) : (
         <View style={styles.fallbackContainer}>
@@ -299,7 +337,115 @@ export default function App() {
         onShutterPress={handleShutterPress}
         onModeSwitch={handleModeSwitch}
         onCaptureModeChange={(m) => { if (!recording) setCaptureMode(m); }}
+        isFlipped={isFlipped}
+        onFlip={handleFlip}
       />
+
+      {/* Zoom bar — shown for all modes when not recording */}
+      {!recording ? (
+        <View style={styles.zoomBarContainer} pointerEvents="box-none">
+          {/* LR/SX: top bar with camera switch button */}
+          {(cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX) ? (
+            <View style={styles.zoomBarTopRow}>
+              {/* Camera switch button */}
+              <Pressable
+                style={styles.cameraSwitchBtn}
+                onPress={() => setActiveZoomTarget(v => v === 'primary' ? 'secondary' : 'primary')}
+              >
+                <Text style={styles.cameraSwitchBtnText}>
+                  {activeZoomTarget === 'primary' ? '后置▼' : '前置▼'}
+                </Text>
+              </Pressable>
+              {/* Zoom level buttons */}
+              {effectiveZoomLevels.map(level => {
+                const active = effectiveCamera === 'back' ? backZoom : frontZoom;
+                return (
+                  <Pressable
+                    key={level}
+                    style={[styles.zoomBtn, active === level && styles.zoomBtnActive]}
+                    onPress={() => {
+                      if (DualCameraModule?.setZoom) {
+                        DualCameraModule.setZoom(effectiveCamera, level);
+                      }
+                      if (effectiveCamera === 'back') setBackZoom(level);
+                      else setFrontZoom(level);
+                    }}
+                  >
+                    <Text style={[styles.zoomBtnText, active === level && styles.zoomBtnTextActive]}>
+                      {level}x
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+
+          {/* Single mode: top bar (no camera switch button) */}
+          {(cameraMode === CAMERA_MODE.BACK || cameraMode === CAMERA_MODE.FRONT) ? (
+            <View style={styles.zoomBarTopRow}>
+              {effectiveZoomLevels.map(level => {
+                const active = effectiveCamera === 'back' ? backZoom : frontZoom;
+                return (
+                  <Pressable
+                    key={level}
+                    style={[styles.zoomBtn, active === level && styles.zoomBtnActive]}
+                    onPress={() => {
+                      if (DualCameraModule?.setZoom) {
+                        DualCameraModule.setZoom(effectiveCamera, level);
+                      }
+                      if (effectiveCamera === 'back') setBackZoom(level);
+                      else setFrontZoom(level);
+                    }}
+                  >
+                    <Text style={[styles.zoomBtnText, active === level && styles.zoomBtnTextActive]}>
+                      {level}x
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+
+          {/* PiP mode: zoom bar follows small window (vertical, on the left side) */}
+          {(cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE) ? (() => {
+            const pipW = pipSize * screenWidth;
+            const pipH = pipSize * screenHeight;
+            const pipCenterX = pipPosition.x * screenWidth;
+            const pipCenterY = pipPosition.y * screenHeight;
+            const barW = 44;
+            const barH = effectiveZoomLevels.length * 44;
+            const rawBarLeft = pipCenterX - pipW / 2 - 8 - barW;
+            const clampedBarLeft = Math.max(0, Math.min(screenWidth - barW, rawBarLeft));
+            const rawBarTop = pipCenterY - barH / 2;
+            const clampedBarTop = Math.max(0, Math.min(screenHeight - barH, rawBarTop));
+            const active = effectiveCamera === 'back' ? backZoom : frontZoom;
+            return (
+              <View style={[styles.zoomBarPip, {
+                left: clampedBarLeft,
+                top: clampedBarTop,
+              }]} pointerEvents="box-none">
+                {effectiveZoomLevels.map(level => (
+                  <Pressable
+                    key={level}
+                    style={[styles.zoomBtnPip, active === level && styles.zoomBtnActive]}
+                    onPress={() => {
+                      if (DualCameraModule?.setZoom) {
+                        DualCameraModule.setZoom(effectiveCamera, level);
+                      }
+                      if (effectiveCamera === 'back') setBackZoom(level);
+                      else setFrontZoom(level);
+                    }}
+                  >
+                    <Text style={[styles.zoomBtnText, active === level && styles.zoomBtnTextActive]}>
+                      {level}x
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            );
+          })() : null}
+        </View>
+      ) : null}
 
       {!mediaPermission?.granted ? (
         <View style={styles.mediaBanner}>
@@ -362,12 +508,6 @@ export default function App() {
           </View>
           <Text style={styles.adjustmentValue}>大小: {Math.round(pipSize * 100)}%</Text>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, gap: 4 }}>
-            <Pressable style={styles.adjustBtn} onPress={() => setPipSize(v => Math.max(0.05, +(v - 0.05).toFixed(2)))}>
-              <Text style={styles.adjustBtnText}>-</Text>
-            </Pressable>
-            <Pressable style={styles.adjustBtn} onPress={() => setPipSize(v => Math.min(0.5, +(v + 0.05).toFixed(2)))}>
-              <Text style={styles.adjustBtnText}>+</Text>
-            </Pressable>
             <Pressable style={styles.adjustBtn} onPress={() => setPipPosition({ x: 0.85, y: 0.80 })}>
               <Text style={styles.adjustBtnText}>右下</Text>
             </Pressable>
@@ -378,8 +518,8 @@ export default function App() {
         </View>
       ) : null}
 
-      {/* 保存比例选择器 - 双摄模式下显示 */}
-      {(cameraMode === CAMERA_MODE.LR || cameraMode === CAMERA_MODE.SX || cameraMode === CAMERA_MODE.PIP_SQUARE || cameraMode === CAMERA_MODE.PIP_CIRCLE) && !recording && !saving ? (
+      {/* Save aspect ratio picker — shown on all modes */}
+      {!recording && !saving ? (
         <View style={styles.aspectPickerContainer} pointerEvents="box-none">
           {['9:16', '3:4', '1:1'].map(r => (
             <Pressable
@@ -408,7 +548,7 @@ export default function App() {
   );
 }
 
-function BottomBar({ cameraMode, captureMode, recording, saving, onShutterPress, onModeSwitch, onCaptureModeChange }) {
+function BottomBar({ cameraMode, captureMode, recording, saving, onShutterPress, onModeSwitch, onCaptureModeChange, isFlipped, onFlip }) {
   return (
     <>
       <View style={styles.rightPanel} pointerEvents="box-none">
@@ -444,7 +584,14 @@ function BottomBar({ cameraMode, captureMode, recording, saving, onShutterPress,
           <View style={[styles.shutterInner, recording && styles.shutterInnerRecording]} />
         </Pressable>
 
-        <View style={styles.flipBtnPlaceholder} />
+        <Pressable
+          style={[styles.flipBtn, isFlipped && styles.flipBtnActive]}
+          onPress={onFlip}
+          accessibilityRole="button"
+          accessibilityLabel="翻转镜头"
+        >
+          <Text style={styles.flipBtnText}>⟳</Text>
+        </Pressable>
       </View>
     </>
   );
@@ -524,7 +671,14 @@ const styles = StyleSheet.create({
   shutterOuterRecording: { borderColor: '#ff4444' },
   shutterInner: { width: 58, height: 58, borderRadius: 29, backgroundColor: '#fff' },
   shutterInnerRecording: { width: 28, height: 28, borderRadius: 6, backgroundColor: '#ff4444' },
-  flipBtnPlaceholder: { width: 52 },
+  flipBtn: {
+    width: 52, height: 52, borderRadius: 26,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: 'transparent',
+  },
+  flipBtnActive: { borderColor: '#4da6ff', backgroundColor: 'rgba(77,166,255,0.25)' },
+  flipBtnText: { color: '#ccc', fontSize: 24, fontWeight: '700' },
 
   mediaBanner: {
     position: 'absolute', left: 16, right: 16,
@@ -612,7 +766,7 @@ const styles = StyleSheet.create({
   adjustToggleText: { color: '#fff', fontSize: 13, fontWeight: '600' },
 
   aspectPickerContainer: {
-    position: 'absolute', left: 12, bottom: 110,
+    position: 'absolute', left: 12, top: 60,
     flexDirection: 'row', gap: 6,
   },
   aspectBtn: {
@@ -627,4 +781,58 @@ const styles = StyleSheet.create({
   },
   aspectBtnText: { color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: '600' },
   aspectBtnTextActive: { color: '#fff' },
+
+  // Zoom bar
+  zoomBarContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 60 : 44,
+    left: 0, right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    pointerEvents: 'box-none',
+  },
+  zoomBarTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginLeft: 12,
+  },
+  cameraSwitchBtn: {
+    paddingHorizontal: 10, paddingVertical: 6,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 12,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+  },
+  cameraSwitchBtnText: {
+    color: 'rgba(255,255,255,0.85)', fontSize: 12, fontWeight: '600',
+  },
+  zoomBarPip: {
+    position: 'absolute',
+    width: 44,
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 4,
+  },
+  zoomBtn: {
+    paddingHorizontal: 12, paddingVertical: 6,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 14,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+    minWidth: 44, alignItems: 'center',
+  },
+  zoomBtnPip: {
+    width: 44, paddingVertical: 6,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    borderRadius: 8,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+  },
+  zoomBtnActive: {
+    backgroundColor: 'rgba(77,166,255,0.7)',
+    borderColor: '#4da6ff',
+  },
+  zoomBtnText: { color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' },
+  zoomBtnTextActive: { color: '#fff', fontWeight: '700' },
+  zoomBar: {}, // kept for backward compat, no longer used
 });

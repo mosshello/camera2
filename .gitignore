@@ -3,28 +3,22 @@
 # dependencies
 node_modules/
 
-# Expo
-.expo/
-dist/
-web-build/
-expo-env.d.ts
-
-# Native
-.kotlin/
+# Native (iOS/Android)
+/ios
+/android
+build/
 *.orig.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
 
-# Metro
-.metro-health-check*
+# Xcode
+*.xcuserstate
+*.xcuserdatad
+*.xcworkspace
+!*.xcworkspace/
+DerivedData/
 
-# debug
-npm-debug.*
-yarn-debug.*
-yarn-error.*
+# CocoaPods
+Pods/
+Podfile.lock
 
 # macOS
 .DS_Store
@@ -32,10 +26,3 @@ yarn-error.*
 
 # local env files
 .env*.local
-
-# typescript
-*.tsbuildinfo
-
-# generated native folders
-/ios
-/android
